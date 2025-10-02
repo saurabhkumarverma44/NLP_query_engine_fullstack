@@ -1,0 +1,288 @@
+version: '3.8'
+
+services:
+  # Universal NLP Query Engine Backend
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/nlp_query_db
+      - REDIS_URL=redis://redis:6379
+      - DEBUG=true
+      - PYTHONPATH=/app
+      - LOG_LEVEL=INFO
+      - ENABLE_CACHE=true
+      - CACHE_TTL_SECONDS=300
+      - MAX_CONCURRENT_QUERIES=10
+      - QUERY_TIMEOUT_SECONDS=30
+      - ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - universal-nlp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "com.universal-nlp.service=backend"
+      - "com.universal-nlp.version=2.0"
+
+  # Universal Frontend React Application
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - REACT_APP_API_URL=http://localhost:8000
+        - REACT_APP_VERSION=2.0.0
+        - REACT_APP_TITLE=Universal NLP Query Engine
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_VERSION=2.0.0
+      - REACT_APP_TITLE=Universal NLP Query Engine
+      - REACT_APP_DESCRIPTION=AI-powered natural language query system for any database
+      - GENERATE_SOURCEMAP=false
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - universal-nlp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "com.universal-nlp.service=frontend"
+      - "com.universal-nlp.version=2.0"
+
+  # PostgreSQL Database (Primary Storage)
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: nlp_query_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - universal-nlp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    labels:
+      - "com.universal-nlp.service=database"
+      - "com.universal-nlp.type=postgres"
+
+  # Redis Cache & Session Storage
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --requirepass ""
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - universal-nlp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "com.universal-nlp.service=cache"
+      - "com.universal-nlp.type=redis"
+
+  # MongoDB (Optional - for NoSQL demonstrations)
+  mongodb:
+    image: mongo:7-jammy
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_DATABASE: nlp_demo
+    volumes:
+      - mongodb_data:/data/db
+      - ./mongo-init:/docker-entrypoint-initdb.d
+    networks:
+      - universal-nlp-network
+    restart: unless-stopped
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "com.universal-nlp.service=database"
+      - "com.universal-nlp.type=mongodb"
+
+  # Nginx Reverse Proxy (Production)
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./nginx/logs:/var/log/nginx
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - universal-nlp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - production
+    labels:
+      - "com.universal-nlp.service=proxy"
+      - "com.universal-nlp.type=nginx"
+
+  # Elasticsearch (Optional - for advanced search)
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    environment:
+      - node.name=elasticsearch
+      - cluster.name=universal-nlp-cluster
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    networks:
+      - universal-nlp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - advanced
+    labels:
+      - "com.universal-nlp.service=search"
+      - "com.universal-nlp.type=elasticsearch"
+
+  # Grafana (Optional - for monitoring)
+  grafana:
+    image: grafana/grafana:10.2.0
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - universal-nlp-network
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    labels:
+      - "com.universal-nlp.service=monitoring"
+      - "com.universal-nlp.type=grafana"
+
+  # Portainer (Optional - for container management)
+  portainer:
+    image: portainer/portainer-ce:2.19.4
+    ports:
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - universal-nlp-network
+    restart: unless-stopped
+    profiles:
+      - management
+    labels:
+      - "com.universal-nlp.service=management"
+      - "com.universal-nlp.type=portainer"
+
+# Named volumes for persistent data
+volumes:
+  postgres_data:
+    driver: local
+    labels:
+      com.universal-nlp.volume: "postgres_data"
+  
+  redis_data:
+    driver: local
+    labels:
+      com.universal-nlp.volume: "redis_data"
+  
+  mongodb_data:
+    driver: local
+    labels:
+      com.universal-nlp.volume: "mongodb_data"
+  
+  elasticsearch_data:
+    driver: local
+    labels:
+      com.universal-nlp.volume: "elasticsearch_data"
+  
+  grafana_data:
+    driver: local
+    labels:
+      com.universal-nlp.volume: "grafana_data"
+  
+  portainer_data:
+    driver: local
+    labels:
+      com.universal-nlp.volume: "portainer_data"
+
+# Custom network
+networks:
+  universal-nlp-network:
+    driver: bridge
+    name: universal-nlp-network
+    labels:
+      com.universal-nlp.network: "main"
+
+# Healthcheck for the entire stack
+x-healthcheck-config: &healthcheck
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 40s
